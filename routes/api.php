@@ -68,6 +68,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('karyawan', KaryawanController::class);
     Route::apiResource('schedules', ScheduleController::class);
     Route::post('schedules/daily-update', [ScheduleController::class, 'updateDailyShift']);
+    Route::post('/schedules/bulk-import', [ScheduleController::class, 'bulkImport']);
     Route::apiResource('overtimes', OvertimeController::class);
     Route::apiResource('kunjungan-dinas', KunjunganDinasController::class);
 
@@ -85,7 +86,7 @@ Route::prefix('absensi')->group(function () {
     Route::post('koreksi', [AbsensiController::class, 'ajukanKoreksi']);
 
     Route::get('/fingerprint-logs', [AbsensiController::class, 'getFingerprintLogs']);
-    
+
         Route::prefix('reports')->group(function () {
             Route::get('recap', [AbsensiController::class, 'recapReport']);
             Route::get('daily-matrix', [AbsensiController::class, 'dailyMatrixReport']);

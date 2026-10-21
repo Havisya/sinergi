@@ -263,4 +263,41 @@ $dataToSave = [
         return response()->json(['message' => 'Gagal menyimpan Quick Shift. Cek log server.'], 500);
     }
 }
+public function bulkImport(Request $request)
+{
+    $request->validate([
+        'schedules' => 'required|array',
+        'schedules.*.nopek' => 'required',
+        'schedules.*.date' => 'required|date',
+        'schedules.*.schedule' => 'required',
+    ]);
+
+    DB::beginTransaction();
+    try {
+        foreach ($request->schedules as $item) {
+            // Hapus/replace atau update jadwal kerja harian untuk karyawan pada tanggal terkait
+            Schedule::updateOrCreate(
+                [
+                    'employee_nopek' => $item['nopek'],
+                    'start_date' => $item['date'],
+                    'end_date' => $item['date'],
+                ],
+                [
+                    'shift_type' => $item['shift_type'] ?? 'Pagi',
+                    'work_system' => $item['work_system'] ?? 'Shift',
+                    'schedule' => $item['schedule'],
+                    'schedule_name' => $item['schedule_name'] ?? 'Import Excel',
+                    'supervisor' => $item['supervisor'] ?? 'System Excel',
+                    'status' => 'Aktif',
+                ]
+            );
+        }
+
+        DB::commit();
+        return response()->json(['message' => 'Impor jadwal Excel berhasil disimpan!']);
+    } catch (\Exception $e) {
+        DB::rollBack();
+        return response()->json(['message' => 'Gagal menyimpan data impor: ' . $e->getMessage()], 500);
+    }
+}
 }

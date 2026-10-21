@@ -5,7 +5,6 @@ use Illuminate\Support\ServiceProvider;
 
 return [
 
-    'timezone' => 'Asia/Jakarta', 
     /*
     |--------------------------------------------------------------------------
     | Application Name
@@ -44,7 +43,7 @@ return [
     |--------------------------------------------------------------------------
     */
 
-    'timezone' => 'UTC',
+    'timezone' => env('APP_TIMEZONE', 'Asia/Jakarta'),
 
     /*
     |--------------------------------------------------------------------------
@@ -91,8 +90,6 @@ return [
     |--------------------------------------------------------------------------
     |
     | Bagian ini menentukan semua penyedia layanan yang harus dimuat oleh Laravel.
-    | File routes/api.php TIDAK akan dimuat jika App\Providers\RouteServiceProvider::class
-    | tidak terdaftar di sini.
     |
     */
 
@@ -101,17 +98,23 @@ return [
         /*
          * Package Service Providers...
          */
-        // \Fruitcake\Cors\CorsServiceProvider::class, // Jika Anda perlu mendaftarkan CORS secara eksplisit
+
+        // \Fruitcake\Cors\CorsServiceProvider::class,
 
         /*
          * Application Service Providers...
          */
+
         App\Providers\AppServiceProvider::class,
+
         // App\Providers\AuthServiceProvider::class,
         // App\Providers\BroadcastServiceProvider::class,
         // App\Providers\EventServiceProvider::class,
 
-        // BARIS KRUSIAL UNTUK MEMUAT RUTE API/WEB:
+        /*
+         * Route Service Provider
+         */
+
         App\Providers\RouteServiceProvider::class,
 
     ])->toArray(),
@@ -123,7 +126,9 @@ return [
     */
 
     'aliases' => Facade::defaultAliases()->merge([
+
         // 'Example' => App\Facades\Example::class,
+
     ])->toArray(),
 
 ];

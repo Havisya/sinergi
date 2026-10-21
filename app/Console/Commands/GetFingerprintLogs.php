@@ -3,132 +3,860 @@
 namespace App\Console\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use App\Models\Absensi;
 use Carbon\Carbon;
+use GuzzleHttp\Client;
+use GuzzleHttp\RequestOptions;
+use GuzzleHttp\Exception\GuzzleException;
 
 class GetFingerprintLogs extends Command
 {
-    /**
-     * Nama dan tanda tangan dari command console.
-     */
     protected $signature = 'fingerprint:pull';
 
-    /**
-     * Deskripsi command.
-     */
-    protected $description = 'Tarik data log fingerprint hari ini secara real-time dan akurat';
+    protected $description = 'Sinkronisasi log fingerprint Hikvision ke database';
 
-    /**
-     * Eksekusi command console.
-     */
     public function handle()
     {
-        $ip = '172.20.10.3'; // Alamat IP mesin fingerprint
-        $user = 'admin';     // Username mesin
-        $pass = '12345678adg'; // Password mesin
+        $ip   = '192.168.1.20';
+        $user = 'admin';
+        $pass = '12345678adg';
 
-        $this->info("Memulai penarikan data real-time dari mesin $ip...");
+        $url = "http://{$ip}/ISAPI/AccessControl/AcsEvent?format=json";
+
+        $this->newLine();
+        $this->line('==============================================');
+        $this->line('       FINGERPRINT SYNC HIKVISION');
+        $this->line('==============================================');
+
+        $this->info("Menghubungkan ke mesin: {$ip}");
 
         try {
-            // Mengambil seluruh log dari awal hari sampai akhir hari ini agar data tidak terlewat
-            $startTime = now()->startOfDay()->format('Y-m-d\TH:i:s');
-            $endTime   = now()->endOfDay()->format('Y-m-d\TH:i:s');
 
-            $response = Http::withDigestAuth($user, $pass)
-                ->withHeaders(['Content-Type' => 'application/json'])
-                ->timeout(30)
-                ->post("http://$ip/ISAPI/AccessControl/AcsEvent?format=json", [
-                    "AcsEventCond" => [
-                        "searchID" => (string) str_replace('.', '', microtime(true)),
-                        "searchResultPosition" => 0,
-                        "maxResults" => 3500, // Kapasitas log ditingkatkan
-                        "major" => 5,
-                        "minor" => 38,
-                        "startTime" => $startTime,
-                        "endTime"   => $endTime,
-                        "sort" => "asc" // Memproses dari waktu paling awal ke terbaru
+            /*
+            |--------------------------------------------------------------------------
+            | CLIENT HTTP
+            |--------------------------------------------------------------------------
+            */
+
+            $client = new Client([
+                'timeout' => 30,
+                'connect_timeout' => 10,
+                'http_errors' => false,
+            ]);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | WAKTU PENCARIAN
+            |--------------------------------------------------------------------------
+            |
+            | Device memberikan waktu seperti:
+            |
+            | 2026-08-27T07:24:09+08:00
+            |
+            | Tetapi query yang terbukti berhasil dari curl menggunakan:
+            |
+            | 2026-08-27T00:00:00
+            | 2026-08-27T23:59:59
+            |
+            | Jadi gunakan format tersebut.
+            |--------------------------------------------------------------------------
+            */
+
+            $tanggal = now('Asia/Jakarta')->format('Y-m-d');
+
+            $startTime = $tanggal . 'T00:00:00';
+            $endTime   = $tanggal . 'T23:59:59';
+
+
+            $this->line(
+                'Waktu aplikasi : '
+                . now('Asia/Jakarta')->format('Y-m-d H:i:s P')
+            );
+
+            $this->line(
+                'Tanggal target : '
+                . $tanggal
+            );
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | PAGINATION
+            |--------------------------------------------------------------------------
+            */
+
+            $position  = 0;
+            $maxResult = 100;
+
+            $allLogs = [];
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SEARCH ID
+            |--------------------------------------------------------------------------
+            |
+            | Harus konsisten selama proses pagination.
+            |
+            */
+
+            $searchID = 'PATRA_' . $tanggal;
+
+
+            do {
+
+                $this->newLine();
+
+                $this->line(
+                    "Mengambil data mulai posisi {$position}..."
+                );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | PAYLOAD
+                |--------------------------------------------------------------------------
+                |
+                | JANGAN tambahkan timezone +07 atau +08.
+                |
+                | JANGAN gunakan minor 38.
+                |
+                | Kita ambil seluruh major 5 terlebih dahulu.
+                |--------------------------------------------------------------------------
+                */
+
+                $payload = [
+                    'AcsEventCond' => [
+                        'searchID' => $searchID,
+
+                        'searchResultPosition' => $position,
+
+                        'maxResults' => $maxResult,
+
+                        'major' => 5,
+
+                        'minor' => 0,
+
+                        'startTime' => $startTime,
+
+                        'endTime' => $endTime,
+
+                        'sort' => 'asc',
+                    ],
+                ];
+
+
+                $this->line('PAYLOAD:');
+
+                $this->line(
+                    json_encode(
+                        $payload,
+                        JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+                    )
+                );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | REQUEST
+                |--------------------------------------------------------------------------
+                |
+                | Gunakan Guzzle Digest Auth.
+                |
+                */
+
+                $response = $client->post(
+                    $url,
+                    [
+                        'auth' => [
+                            $user,
+                            $pass,
+                            'digest',
+                        ],
+
+                        'headers' => [
+                            'Content-Type' => 'application/json',
+
+                            'Accept' => 'application/json',
+                        ],
+
+                        RequestOptions::JSON => $payload,
                     ]
-                ]);
+                );
 
-            if ($response->successful()) {
-                $data = $response->json();
-                $logs = $data['AcsEvent']['InfoList'] ?? [];
 
-                if (empty($logs)) {
-                    $this->warn("Koneksi sukses, tetapi tidak ada log ditemukan untuk hari ini.");
-                    return;
+                $status = $response->getStatusCode();
+
+                $body = (string) $response->getBody();
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | ERROR HTTP
+                |--------------------------------------------------------------------------
+                */
+
+                if ($status !== 200) {
+
+                    $this->error(
+                        'Gagal mengambil data fingerprint.'
+                    );
+
+                    $this->error(
+                        'HTTP Status: ' . $status
+                    );
+
+                    $this->line($body);
+
+
+                    Log::error(
+                        'Fingerprint API Error',
+                        [
+                            'status' => $status,
+
+                            'url' => $url,
+
+                            'payload' => $payload,
+
+                            'body' => $body,
+                        ]
+                    );
+
+
+                    return self::FAILURE;
                 }
 
-                $countNew = 0;
-                $countUpdate = 0;
+
+                /*
+                |--------------------------------------------------------------------------
+                | DECODE RESPONSE
+                |--------------------------------------------------------------------------
+                */
+
+                $data = json_decode(
+                    $body,
+                    true
+                );
+
+
+                if (!is_array($data)) {
+
+                    $this->error(
+                        'Response fingerprint bukan JSON valid.'
+                    );
+
+                    $this->line($body);
+
+                    return self::FAILURE;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | CEK ERROR DARI DEVICE
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+                    isset($data['statusCode'])
+                    && $data['statusCode'] != 1
+                ) {
+
+                    $this->error(
+                        'Device mengembalikan error.'
+                    );
+
+                    $this->line(
+                        json_encode(
+                            $data,
+                            JSON_PRETTY_PRINT
+                        )
+                    );
+
+                    Log::error(
+                        'Fingerprint Device Error',
+                        [
+                            'payload' => $payload,
+                            'response' => $data,
+                        ]
+                    );
+
+                    return self::FAILURE;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | ACS EVENT
+                |--------------------------------------------------------------------------
+                */
+
+                $eventData =
+                    $data['AcsEvent']
+                    ?? [];
+
+
+                $logs =
+                    $eventData['InfoList']
+                    ?? [];
+
+
+                $numOfMatches =
+                    (int) (
+                        $eventData['numOfMatches']
+                        ?? count($logs)
+                    );
+
+
+                $totalMatches =
+                    (int) (
+                        $eventData['totalMatches']
+                        ?? count($logs)
+                    );
+
+
+                $responseStatus =
+                    $eventData['responseStatusStrg']
+                    ?? '';
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | OUTPUT
+                |--------------------------------------------------------------------------
+                */
+
+                $this->info(
+                    'Data diterima: '
+                    . count($logs)
+                );
+
+                $this->line(
+                    'Total hasil device: '
+                    . $totalMatches
+                );
+
+                $this->line(
+                    'Status device: '
+                    . $responseStatus
+                );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | SIMPAN LOG
+                |--------------------------------------------------------------------------
+                */
 
                 foreach ($logs as $log) {
-                    if (empty($log['employeeNoString'])) continue;
 
-                    // Normalisasi NIP menjadi 3 digit (contoh: 50 menjadi 050)
-                    $nipRaw = trim($log['employeeNoString']);
-                    $nip = str_pad($nipRaw, 3, "0", STR_PAD_LEFT);
+                    $allLogs[] = $log;
+                }
 
-                    $eventTime = $log['time'];
-                    $tanggal = Carbon::parse($eventTime)->format('Y-m-d');
-                    $jamAbsen = Carbon::parse($eventTime)->format('Y-m-d H:i:s');
 
-                    // Cari apakah karyawan sudah memiliki catatan absensi pada tanggal tersebut
-                    $attendance = Absensi::where('nip', $nip)
-                        ->whereDate('clock_in_time', $tanggal)
-                        ->first();
+                /*
+                |--------------------------------------------------------------------------
+                | PAGINATION
+                |--------------------------------------------------------------------------
+                */
 
-                    if (!$attendance) {
-                        // --- LOGIKA INSERT (CLOCK-IN) ---
-                        $jamHanya = Carbon::parse($eventTime)->format('H:i');
-                        // Logika status awal jika belum diatur jadwal spesifik di Roster
-                        $statusAwal = ($jamHanya > '08:00') ? 'Terlambat' : 'Tepat Waktu';
+                if (empty($logs)) {
 
-                        Absensi::create([
-                            'nip' => $nip,
-                            'clock_in_time' => $jamAbsen,
-                            'status' => "$statusAwal | Belum Keluar", // Status default saat baru masuk
+                    break;
+                }
+
+
+                $position += $numOfMatches;
+
+
+                if (
+                    $responseStatus === 'OK'
+                    || $position >= $totalMatches
+                ) {
+
+                    break;
+                }
+
+
+                if ($responseStatus !== 'MORE') {
+
+                    break;
+                }
+
+
+            } while (true);
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | TOTAL
+            |--------------------------------------------------------------------------
+            */
+
+            $this->newLine();
+
+            $this->info(
+                'TOTAL LOG DITERIMA: '
+                . count($allLogs)
+            );
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | TIDAK ADA DATA
+            |--------------------------------------------------------------------------
+            */
+
+            if (empty($allLogs)) {
+
+                $this->warn(
+                    'Tidak ada log fingerprint ditemukan.'
+                );
+
+                $this->warn(
+                    'Jika curl manual menemukan data, '
+                    . 'bandingkan payload Laravel dengan payload curl.'
+                );
+
+                return self::SUCCESS;
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SORT
+            |--------------------------------------------------------------------------
+            */
+
+            usort(
+                $allLogs,
+                function ($a, $b) {
+
+                    return strcmp(
+                        $a['time'] ?? '',
+                        $b['time'] ?? ''
+                    );
+                }
+            );
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | COUNTER
+            |--------------------------------------------------------------------------
+            */
+
+            $countNew    = 0;
+            $countUpdate = 0;
+            $countSkip   = 0;
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | PROSES LOG
+            |--------------------------------------------------------------------------
+            */
+
+            foreach ($allLogs as $log) {
+
+                /*
+                |--------------------------------------------------------------------------
+                | VALIDASI
+                |--------------------------------------------------------------------------
+                */
+
+                if (
+                    empty($log['employeeNoString'])
+                    || empty($log['time'])
+                ) {
+
+                    continue;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | NIP
+                |--------------------------------------------------------------------------
+                */
+
+                $nipRaw = trim(
+                    (string) $log['employeeNoString']
+                );
+
+
+                $nip = str_pad(
+                    $nipRaw,
+                    3,
+                    '0',
+                    STR_PAD_LEFT
+                );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | WAKTU DEVICE
+                |--------------------------------------------------------------------------
+                |
+                | Device mengirim contoh:
+                |
+                | 2026-08-27T07:24:09+08:00
+                |
+                | Waktu tersebut secara angka harus diperlakukan
+                | sebagai WIB pada aplikasi Anda.
+                |
+                | Jadi kita TIDAK melakukan:
+                |
+                | Carbon::parse($time)->setTimezone(...)
+                |
+                | karena itu akan mengurangi 1 jam.
+                |--------------------------------------------------------------------------
+                */
+
+                $rawTime = trim(
+                    (string) $log['time']
+                );
+
+
+                /*
+                | Ambil 19 karakter pertama:
+                |
+                | 2026-08-27T07:24:09
+                */
+
+                $localTime = substr(
+                    $rawTime,
+                    0,
+                    19
+                );
+
+
+                $eventTime = Carbon::createFromFormat(
+                    'Y-m-d\TH:i:s',
+                    $localTime,
+                    'Asia/Jakarta'
+                );
+
+
+                $tanggalLog =
+                    $eventTime->format('Y-m-d');
+
+
+                $jamAbsen =
+                    $eventTime->format('Y-m-d H:i:s');
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | TAMPILKAN
+                |--------------------------------------------------------------------------
+                */
+
+                $this->line(
+                    'LOG | '
+                    . 'NIP ' . $nip
+                    . ' | '
+                    . $jamAbsen
+                    . ' | '
+                    . 'minor='
+                    . ($log['minor'] ?? '-')
+                );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | CARI ABSENSI
+                |--------------------------------------------------------------------------
+                */
+
+                $attendance = Absensi::where(
+                    'nip',
+                    $nip
+                )
+                ->whereDate(
+                    'clock_in_time',
+                    $tanggalLog
+                )
+                ->first();
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | CLOCK-IN BARU
+                |--------------------------------------------------------------------------
+                */
+
+                if (!$attendance) {
+
+                    $jamHanya =
+                        $eventTime->format('H:i');
+
+
+                    $statusAwal =
+                        $jamHanya > '08:00'
+                        ? 'Terlambat'
+                        : 'Tepat Waktu';
+
+
+                    Absensi::create([
+                        'nip' =>
+                            $nip,
+
+                        'clock_in_time' =>
+                            $jamAbsen,
+
+                        'clock_out_time' =>
+                            null,
+
+                        'status' =>
+                            $statusAwal
+                            . ' | Belum Keluar',
+                    ]);
+
+
+                    $this->info(
+                        'INSERT CLOCK-IN | '
+                        . 'NIP '
+                        . $nip
+                        . ' | '
+                        . $jamAbsen
+                    );
+
+
+                    $countNew++;
+
+                    continue;
+                }
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | CLOCK-IN SUDAH ADA
+                |--------------------------------------------------------------------------
+                */
+
+                $clockIn = Carbon::parse(
+                    $attendance->clock_in_time,
+                    'Asia/Jakarta'
+                );
+
+
+                /*
+                |--------------------------------------------------------------------------
+                | EVENT LEBIH BARU
+                |--------------------------------------------------------------------------
+                */
+
+                if ($eventTime->gt($clockIn)) {
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | BELUM ADA CLOCK-OUT
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (
+                        empty(
+                            $attendance->clock_out_time
+                        )
+                    ) {
+
+                        $currentStatus =
+                            $attendance->status
+                            ?? 'Tepat Waktu';
+
+
+                        $cleanStatus =
+                            trim(
+                                explode(
+                                    '|',
+                                    $currentStatus
+                                )[0]
+                            );
+
+
+                        $attendance->update([
+                            'clock_out_time' =>
+                                $jamAbsen,
+
+                            'status' =>
+                                $cleanStatus,
                         ]);
 
-                        $this->line("<info>BERHASIL:</info> NIP $nip Clock-in pada $jamAbsen");
-                        $countNew++;
-                    } else {
-                        // --- LOGIKA UPDATE (CLOCK-OUT) ---
-                        $jamTappingBaru = Carbon::parse($jamAbsen);
-                        $jamMasukDB = Carbon::parse($attendance->clock_in_time);
 
-                        /** * PERBAIKAN UTAMA:
-                         * Menggunakan gt (greater than) agar setiap tapping yang lebih baru dari jam masuk
-                         * langsung tercatat sebagai clock-out, meskipun selisihnya hanya hitungan detik.
-                         */
-                        if ($jamTappingBaru->gt($jamMasukDB)) {
+                        $this->comment(
+                            'UPDATE CLOCK-OUT | '
+                            . 'NIP '
+                            . $nip
+                            . ' | '
+                            . $jamAbsen
+                        );
 
-                            // Ambil status awal (Tepat Waktu/Terlambat) dan hapus keterangan "Belum Keluar"
-                            $currentStatus = $attendance->status;
-                            $cleanStatus = trim(explode('|', $currentStatus)[0]);
 
-                            $attendance->update([
-                                'clock_out_time' => $jamAbsen,
-                                'status' => $cleanStatus // Menjadi status bersih untuk diolah AbsensiController
-                            ]);
+                        $countUpdate++;
 
-                            $this->line("<comment>UPDATE:</comment> NIP $nip Clock-out diperbarui ke $jamAbsen");
-                            $countUpdate++;
-                        }
+                        continue;
+                    }
+
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | CLOCK-OUT SUDAH ADA
+                    |--------------------------------------------------------------------------
+                    */
+
+                    $clockOut = Carbon::parse(
+                        $attendance->clock_out_time,
+                        'Asia/Jakarta'
+                    );
+
+
+                    if ($eventTime->gt($clockOut)) {
+
+                        $attendance->update([
+                            'clock_out_time' =>
+                                $jamAbsen,
+                        ]);
+
+
+                        $this->comment(
+                            'UPDATE CLOCK-OUT TERBARU | '
+                            . 'NIP '
+                            . $nip
+                            . ' | '
+                            . $jamAbsen
+                        );
+
+
+                        $countUpdate++;
+
+                        continue;
                     }
                 }
 
-                $this->info("Sinkronisasi Selesai. ($countNew data baru, $countUpdate update jam pulang)");
 
-            } else {
-                $this->error("Gagal terhubung ke mesin. Status: " . $response->status());
-                Log::error("Fingerprint API Error: " . $response->body());
+                /*
+                |--------------------------------------------------------------------------
+                | SKIP
+                |--------------------------------------------------------------------------
+                */
+
+                $this->warn(
+                    'SKIP | '
+                    . 'NIP '
+                    . $nip
+                    . ' | '
+                    . 'Data duplikat / lebih lama.'
+                );
+
+
+                $countSkip++;
             }
-        } catch (\Exception $e) {
-            $this->error("Terjadi kesalahan: " . $e->getMessage());
-            Log::error("Fingerprint Command Crash: " . $e->getMessage());
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SUMMARY
+            |--------------------------------------------------------------------------
+            */
+
+            $this->newLine();
+
+            $this->line(
+                '=============================================='
+            );
+
+            $this->info(
+                '       SINKRONISASI SELESAI'
+            );
+
+            $this->line(
+                '=============================================='
+            );
+
+            $this->line(
+                'Total log       : '
+                . count($allLogs)
+            );
+
+            $this->line(
+                'Clock-in baru   : '
+                . $countNew
+            );
+
+            $this->line(
+                'Clock-out baru  : '
+                . $countUpdate
+            );
+
+            $this->line(
+                'Data dilewati   : '
+                . $countSkip
+            );
+
+            $this->line(
+                '=============================================='
+            );
+
+
+            return self::SUCCESS;
+
+
+        } catch (GuzzleException $e) {
+
+            $this->error(
+                'Guzzle HTTP Error: '
+                . $e->getMessage()
+            );
+
+
+            Log::error(
+                'Fingerprint Guzzle Error',
+                [
+                    'message' =>
+                        $e->getMessage(),
+
+                    'file' =>
+                        $e->getFile(),
+
+                    'line' =>
+                        $e->getLine(),
+                ]
+            );
+
+
+            return self::FAILURE;
+
+
+        } catch (\Throwable $e) {
+
+            $this->error(
+                'Terjadi kesalahan: '
+                . $e->getMessage()
+            );
+
+
+            Log::error(
+                'Fingerprint Command Crash',
+                [
+                    'message' =>
+                        $e->getMessage(),
+
+                    'file' =>
+                        $e->getFile(),
+
+                    'line' =>
+                        $e->getLine(),
+
+                    'trace' =>
+                        $e->getTraceAsString(),
+                ]
+            );
+
+
+            return self::FAILURE;
         }
     }
 }
