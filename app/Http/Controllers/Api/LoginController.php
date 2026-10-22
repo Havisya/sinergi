@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
+use Laravel\Sanctum\PersonalAccessToken;
 
 class LoginController extends Controller
 {
@@ -65,30 +66,19 @@ class LoginController extends Controller
     /**
      * 🚪 Logout user dan cabut token Sanctum.
      */
-public function logout(Request $request)
+    public function logout(Request $request)
     {
-        try {
-            $user = $request->user();
+        $token = $request->user()->currentAccessToken();
 
-            if ($user) {
-                // Jika user berhasil dimuat (berarti token valid), cabut SEMUA token user tersebut.
-                // Ini lebih aman jika kita tidak bisa mengakses currentAccessToken()
-                // $user->tokens()->delete();
-
-                // 🛑 JIKA TETAP CRASH, gunakan solusi bypass murni ini:
-            }
-
-            \Illuminate\Support\Facades\Log::info("✅ Logout API Success (Bypassed).");
-
-            // Kembalikan respons sukses 200 OK.
-            return response()->json([
-                'status' => 'success',
-                'message' => 'Berhasil logout. Sesi dihapus dari sisi klien.',
-            ], 200);
-
-        } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::error("❌ Logout fatal error: {$e->getMessage()}");
-            return response()->json(['message' => 'Kesalahan fatal saat proses logout API.'], 500);
+        if ($token instanceof PersonalAccessToken) {
+            $token->delete();
         }
+
+        Log::info('User logged out.');
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Berhasil logout. Sesi dihapus dari sisi klien.',
+        ]);
     }
 }

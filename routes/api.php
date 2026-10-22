@@ -19,7 +19,6 @@ use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\CompanySettingController;
 use App\Http\Controllers\Api\LocationController;
 use App\Http\Controllers\Api\PasswordResetController;
-use App\Models\User;
 
 /*
 |--------------------------------------------------------------------------
@@ -38,14 +37,15 @@ Route::post('/login', [LoginController::class, 'login'])->name('api.login.post')
 Route::get('/login', function () {
     return response()->json(['status' => 'error', 'message' => 'Unauthenticated.'], 401);
 })->name('login');
-Route::post('/logout', [LoginController::class, 'logout']);
 
 // Password Reset
 Route::post('forgot-password/send-link', [PasswordResetController::class, 'sendResetLink']);
 Route::post('forgot-password/reset', [PasswordResetController::class, 'reset']);
 
 // Absensi Karyawan (Jika diizinkan tanpa Sanctum)
-Route::get('/', [AbsensiController::class, 'index']); // Absensi index (mungkin untuk cek status server)
+Route::get('/', function () {
+    return response()->json(['status' => 'success', 'message' => 'API is working']);
+});
 Route::post('clockin', [AbsensiController::class, 'clockIn']);
 Route::post('clockout', [AbsensiController::class, 'clockOut']);
 Route::post('absensi/roster-statuses', [AbsensiController::class, 'getRosterStatuses']);
@@ -63,6 +63,7 @@ Route::get('karyawan/names-list', [KaryawanController::class, 'getNamesList']);
 | agar `auth()->user()` terisi dan `AuditLog` dapat mendeteksi user.
 */
 Route::middleware('auth:sanctum')->group(function () {
+    Route::post('/logout', [LoginController::class, 'logout']);
 
     // Karyawan & Master Data
     Route::apiResource('karyawan', KaryawanController::class);
@@ -138,8 +139,8 @@ Route::prefix('absensi')->group(function () {
 
     // ADMIN AREA
     Route::prefix('admin')->group(function () {
-        Route::get('/debug-auth-check', function () {
-            $user = auth()->user();
+        Route::get('/debug-auth-check', function (Request $request) {
+            $user = $request->user();
             if (!$user) {
                 return response()->json(['message' => 'Otentikasi Gagal di Auth Check'], 401);
             }
@@ -154,20 +155,4 @@ Route::prefix('absensi')->group(function () {
         Route::get('/profile', [AdminProfileController::class, 'getProfile']);
         Route::post('/broadcast', [AdminProfileController::class, 'broadcastMessage']);
     });
-});
-
-// Debug akses model (Dibiarkan di luar untuk testing, tidak memengaruhi logging)
-Route::get('/debug-profile-bypass-test', function () {
-    $user = User::where('role', 'Super Admin')->first();
-    if (!$user) {
-        return response()->json(['message' => 'Admin not seeded.'], 404);
-    }
-    return response()->json([
-        'message' => 'Jalur Model/DB Aman.',
-        'data' => [
-            'id' => $user->id,
-            'name' => $user->name,
-            'last_login' => $user->last_login_at ?? null,
-        ]
-    ]);
 });
